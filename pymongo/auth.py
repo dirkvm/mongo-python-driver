@@ -322,6 +322,13 @@ def _authenticate_gssapi(credentials, sock_info):
         if result != kerberos.AUTH_GSS_COMPLETE:
             raise OperationFailure('Kerberos context failed to initialize.')
 
+        if username is None:
+            # Get default principal name from security context
+            result = kerberos.authGSSClientInquireCred(ctx)
+            if result != kerberos.AUTH_GSS_COMPLETE:
+                raise OperationFailure('Failed to inquire Kerberos user.')
+            username = kerberos.authGSSClientUserName(ctx)
+
         try:
             # pykerberos uses a weird mix of exceptions and return values
             # to indicate errors.
