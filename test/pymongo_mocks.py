@@ -1,4 +1,4 @@
-# Copyright 2013-2015 MongoDB, Inc.
+# Copyright 2013-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ class MockMonitor(Monitor):
             pool,
             topology_settings)
 
-    def _check_once(self, metadata=None):
+    def _check_once(self, metadata=None, cluster_time=None):
         address = self._server_description.address
         response, rtt = self.client.mock_is_master('%s:%d' % address)
         return ServerDescription(address, IsMaster(response), rtt)

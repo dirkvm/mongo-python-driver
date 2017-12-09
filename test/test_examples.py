@@ -14,6 +14,7 @@
 
 """MongoDB documentation examples in Python."""
 
+import threading
 import sys
 
 sys.path[0:0] = [""]
@@ -514,8 +515,6 @@ class TestSampleShellCommands(unittest.TestCase):
             self.assertTrue("instock" in doc)
             self.assertEqual(len(doc["instock"]), 1)
 
-    # The $currentDate operator was new in MongoDB 2.6.
-    @client_context.require_version_min(2, 6)
     def test_update_and_replace(self):
         db = client_context.client.pymongo_test
 
@@ -648,6 +647,39 @@ class TestSampleShellCommands(unittest.TestCase):
         # End Example 56
 
         self.assertEqual(db.inventory.count(), 0)
+
+    @client_context.require_version_min(3, 5, 11)
+    @client_context.require_replica_set
+    def test_change_streams(self):
+        db = client_context.client.pymongo_test
+        done = False
+
+        def insert_docs():
+            while not done:
+                db.inventory.insert_one({})
+
+        t = threading.Thread(target=insert_docs)
+        t.start()
+
+        try:
+            # Start Changestream Example 1
+            cursor = db.inventory.watch()
+            document = next(cursor)
+            # End Changestream Example 1
+
+            # Start Changestream Example 2
+            cursor = db.inventory.watch(full_document='updateLookup')
+            document = next(cursor)
+            # End Changestream Example 2
+
+            # Start Changestream Example 3
+            resume_token = document.get("_id")
+            cursor = db.inventory.watch(resume_after=resume_token)
+            document = next(cursor)
+            # End Changestream Example 3
+        finally:
+            done = True
+            t.join()
 
 
 if __name__ == "__main__":

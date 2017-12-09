@@ -1,4 +1,4 @@
-# Copyright 2014-2016 MongoDB, Inc.
+# Copyright 2014-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you
 # may not use this file except in compliance with the License.  You
@@ -38,6 +38,7 @@ from pymongo.server import Server
 from pymongo.server_selectors import (any_server_selector,
                                       arbiter_server_selector,
                                       secondary_server_selector,
+                                      readable_server_selector,
                                       writable_server_selector,
                                       Selection)
 from pymongo.client_session import _ServerSessionPool
@@ -108,6 +109,7 @@ class Topology(object):
         self._condition = self._settings.condition_class(self._lock)
         self._servers = {}
         self._pid = None
+        self._max_cluster_time = None
         self._session_pool = _ServerSessionPool()
 
         if self._publish_server or self._publish_tp:
@@ -136,7 +138,7 @@ class Topology(object):
           by mutual exclusion. Using Topology from a process other than the one
           that initialized it will emit a warning and may result in deadlock. To
           prevent this from happening, MongoClient must be created after any
-          forking OR MongoClient must be started with connect=False.
+          forking.
 
         """
         if self._pid is None:
@@ -144,10 +146,10 @@ class Topology(object):
         else:
             if os.getpid() != self._pid:
                 warnings.warn(
-                    "MongoClient opened before fork. Create MongoClient "
-                    "with connect=False, or create client after forking. "
-                    "See PyMongo's documentation for details: http://api."
-                    "mongodb.org/python/current/faq.html#pymongo-fork-safe>")
+                    "MongoClient opened before fork. Create MongoClient only "
+                    "after forking. See PyMongo's documentation for details: "
+                    "http://api.mongodb.org/python/current/faq.html#"
+                    "is-pymongo-fork-safe")
 
         with self._lock:
             self._ensure_opened()
@@ -266,6 +268,8 @@ class Topology(object):
                     self._description, server_description)
 
                 self._update_servers()
+                self._receive_cluster_time_no_lock(
+                    server_description.cluster_time)
 
                 if self._publish_tp:
                     self._events.put((
@@ -316,6 +320,28 @@ class Topology(object):
     def get_arbiters(self):
         """Return set of arbiter addresses."""
         return self._get_replica_set_members(arbiter_server_selector)
+
+    def max_cluster_time(self):
+        """Return a document, the highest seen $clusterTime."""
+        return self._max_cluster_time
+
+    def _receive_cluster_time_no_lock(self, cluster_time):
+        # Driver Sessions Spec: "Whenever a driver receives a cluster time from
+        # a server it MUST compare it to the current highest seen cluster time
+        # for the deployment. If the new cluster time is higher than the
+        # highest seen cluster time it MUST become the new highest seen cluster
+        # time. Two cluster times are compared using only the BsonTimestamp
+        # value of the clusterTime embedded field."
+        if cluster_time:
+            # ">" uses bson.timestamp.Timestamp's comparison operator.
+            if (not self._max_cluster_time
+                or cluster_time['clusterTime'] >
+                    self._max_cluster_time['clusterTime']):
+                self._max_cluster_time = cluster_time
+
+    def receive_cluster_time(self, cluster_time):
+        with self._lock:
+            self._receive_cluster_time_no_lock(cluster_time)
 
     def request_check_all(self, wait_time=5):
         """Wake all monitors, wait for at least one to check its server."""
@@ -371,15 +397,26 @@ class Topology(object):
     def description(self):
         return self._description
 
+    def pop_all_sessions(self):
+        """Pop all session ids from the pool."""
+        with self._lock:
+            return self._session_pool.pop_all()
+
     def get_server_session(self):
         """Start or resume a server session, or raise ConfigurationError."""
         with self._lock:
             session_timeout = self._description.logical_session_timeout_minutes
             if session_timeout is None:
                 # Maybe we need an initial scan? Can raise ServerSelectionError.
-                if not self.description.has_known_servers:
+                if self._description.topology_type == TOPOLOGY_TYPE.Single:
+                    if not self._description.has_known_servers:
+                        self._select_servers_loop(
+                            any_server_selector,
+                            self._settings.server_selection_timeout,
+                            None)
+                elif not self._description.readable_servers:
                     self._select_servers_loop(
-                        any_server_selector,
+                        readable_server_selector,
                         self._settings.server_selection_timeout,
                         None)
 
@@ -390,12 +427,17 @@ class Topology(object):
 
             return self._session_pool.get_server_session(session_timeout)
 
-    def return_server_session(self, server_session):
-        with self._lock:
-            session_timeout = self._description.logical_session_timeout_minutes
-            if session_timeout is not None:
-                self._session_pool.return_server_session(server_session, 
-                                                         session_timeout)
+    def return_server_session(self, server_session, lock):
+        if lock:
+            with self._lock:
+                session_timeout = \
+                    self._description.logical_session_timeout_minutes
+                if session_timeout is not None:
+                    self._session_pool.return_server_session(server_session,
+                                                             session_timeout)
+        else:
+            # Called from a __del__ method, can't use a lock.
+            self._session_pool.return_server_session_no_lock(server_session)
 
     def _new_selection(self):
         """A Selection object, initially including all known servers.
@@ -416,10 +458,10 @@ class Topology(object):
             # Start or restart the events publishing thread.
             if self._publish_tp or self._publish_server:
                 self.__events_executor.open()
-        else:
-            # Restart monitors if we forked since previous call.
-            for server in itervalues(self._servers):
-                server.open()
+
+        # Ensure that the monitors are open.
+        for server in itervalues(self._servers):
+            server.open()
 
     def _reset_server(self, address):
         """Clear our pool for a server and mark it Unknown.

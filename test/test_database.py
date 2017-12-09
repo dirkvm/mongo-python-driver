@@ -1,4 +1,4 @@
-# Copyright 2009-2015 MongoDB, Inc.
+# Copyright 2009-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -155,20 +155,24 @@ class TestDatabase(IntegrationTest):
         self.assertTrue(u"test.foo" in db.collection_names())
         self.assertRaises(CollectionInvalid, db.create_collection, "test.foo")
 
-    def test_collection_names(self):
+    def _test_collection_names(self, meth, test_no_system):
         db = Database(self.client, "pymongo_test")
         db.test.insert_one({"dummy": u"object"})
         db.test.mike.insert_one({"dummy": u"object"})
 
-        colls = db.collection_names()
+        colls = getattr(db, meth)()
         self.assertTrue("test" in colls)
         self.assertTrue("test.mike" in colls)
         for coll in colls:
             self.assertTrue("$" not in coll)
 
-        colls_without_systems = db.collection_names(False)
-        for coll in colls_without_systems:
-            self.assertTrue(not coll.startswith("system."))
+        if test_no_system:
+            db.systemcoll.test.insert_one({})
+            no_system_collections = getattr(
+                db, meth)(include_system_collections=False)
+            for coll in no_system_collections:
+                self.assertTrue(not coll.startswith("system."))
+            self.assertIn("systemcoll.test", no_system_collections)
 
         # Force more than one batch.
         db = self.client.many_collections
@@ -176,9 +180,90 @@ class TestDatabase(IntegrationTest):
             db["coll" + str(i)].insert_one({})
         # No Error
         try:
-            db.collection_names()
+            getattr(db, meth)()
         finally:
             self.client.drop_database("many_collections")
+
+    def test_collection_names(self):
+        self._test_collection_names('collection_names', True)
+
+    def test_list_collection_names(self):
+        self._test_collection_names('list_collection_names', False)
+
+    def test_list_collections(self):
+        self.client.drop_database("pymongo_test")
+        db = Database(self.client, "pymongo_test")
+        db.test.insert_one({"dummy": u"object"})
+        db.test.mike.insert_one({"dummy": u"object"})
+
+        results = db.list_collections()
+        colls = [result["name"] for result in results]
+
+        # All the collections present.
+        self.assertTrue("test" in colls)
+        self.assertTrue("test.mike" in colls)
+
+        # No collection containing a '$'.
+        for coll in colls:
+            self.assertTrue("$" not in coll)
+
+        # Duplicate check.
+        coll_cnt = {}
+        for coll in colls:
+            try:
+                # Found duplicate.
+                coll_cnt[coll] += 1
+                self.assertTrue(False)
+            except KeyError:
+                coll_cnt[coll] = 1
+        coll_cnt = {}
+
+        # Checking if is there any collection which don't exists.
+        if (len(set(colls) - set(["test","test.mike"])) == 0 or
+            len(set(colls) - set(["test","test.mike","system.indexes"])) == 0):
+            self.assertTrue(True)
+        else:
+            self.assertTrue(False)
+
+        colls = db.list_collections(filter={"name": {"$regex": "^test$"}})
+        self.assertEqual(1, len(list(colls)))
+
+        colls = db.list_collections(filter={"name": {"$regex": "^test.mike$"}})
+        self.assertEqual(1, len(list(colls)))
+
+        db.drop_collection("test")
+
+        db.create_collection("test", capped=True, size=4096)
+        results = db.list_collections(filter={'options.capped': True})
+        colls = [result["name"] for result in results]
+
+        # Checking only capped collections are present
+        self.assertTrue("test" in colls)
+        self.assertFalse("test.mike" in colls)
+
+        # No collection containing a '$'.
+        for coll in colls:
+            self.assertTrue("$" not in coll)
+
+        # Duplicate check.
+        coll_cnt = {}
+        for coll in colls:
+            try:
+                # Found duplicate.
+                coll_cnt[coll] += 1
+                self.assertTrue(False)
+            except KeyError:
+                coll_cnt[coll] = 1
+        coll_cnt = {}
+
+        # Checking if is there any collection which don't exists.
+        if (len(set(colls) - set(["test"])) == 0 or
+            len(set(colls) - set(["test","system.indexes"])) == 0):
+            self.assertTrue(True)
+        else:
+            self.assertTrue(False)
+
+        self.client.drop_database("pymongo_test")
 
     def test_collection_names_single_socket(self):
         # Test that Database.collection_names only requires one socket.
@@ -358,7 +443,6 @@ class TestDatabase(IntegrationTest):
     # MongoDB 2.3.2, aggregation turned regexes into strings: SERVER-6470.
     # Note: MongoDB 3.5.2 requires the 'cursor' or 'explain' option for
     # aggregate.
-    @client_context.require_version_min(2, 3, 2)
     @client_context.require_version_max(3, 5, 0)
     def test_command_with_regex(self):
         db = self.client.pymongo_test
@@ -405,17 +489,16 @@ class TestDatabase(IntegrationTest):
         self.assertRaises(ConfigurationError, auth_db.add_user,
                           "user", 'password', True, roles=['read'])
 
-        if client_context.version.at_least(2, 5, 3, -1):
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", DeprecationWarning)
-                self.assertRaises(DeprecationWarning, auth_db.add_user,
-                                  "user", "password")
-                self.assertRaises(DeprecationWarning, auth_db.add_user,
-                                  "user", "password", True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            self.assertRaises(DeprecationWarning, auth_db.add_user,
+                              "user", "password")
+            self.assertRaises(DeprecationWarning, auth_db.add_user,
+                              "user", "password", True)
 
-            with ignore_deprecations():
-                self.assertRaises(ConfigurationError, auth_db.add_user,
-                                  "user", "password", digestPassword=True)
+        with ignore_deprecations():
+            self.assertRaises(ConfigurationError, auth_db.add_user,
+                              "user", "password", digestPassword=True)
 
         # Add / authenticate / remove
         auth_db.add_user("mike", "password", roles=["read"])
@@ -444,15 +527,6 @@ class TestDatabase(IntegrationTest):
         self.assertRaises(OperationFailure, check_auth, "Gustave", u"Dor\xe9")
         check_auth("Gustave", u"password")
 
-        if not client_context.version.at_least(2, 5, 3, -1):
-            # Add a readOnly user
-            with ignore_deprecations():
-                auth_db.add_user("Ross", "password", read_only=True)
-
-            check_auth("Ross", u"password")
-            self.assertTrue(
-                auth_db.system.users.find({"readOnly": True}).count())
-
     @client_context.require_auth
     def test_make_user_readonly(self):
         # "self.client" is logged in as root.
@@ -480,7 +554,6 @@ class TestDatabase(IntegrationTest):
                           c.pymongo_test.collection.insert_one,
                           {})
 
-    @client_context.require_version_min(2, 5, 3, -1)
     @client_context.require_auth
     def test_default_roles(self):
         # "self.client" is logged in as root.
@@ -510,7 +583,6 @@ class TestDatabase(IntegrationTest):
         info = auth_db.command('usersInfo', 'ro-user')['users'][0]
         self.assertEqual("read", info['roles'][0]['role'])
 
-    @client_context.require_version_min(2, 5, 3, -1)
     @client_context.require_auth
     def test_new_user_cmds(self):
         # "self.client" is logged in as root.
@@ -549,11 +621,8 @@ class TestDatabase(IntegrationTest):
 
         self.assertRaises(OperationFailure, users_db.test.find_one)
 
-        if client_context.version.at_least(2, 5, 3, -1):
-            admin_db_auth.add_user('ro-admin', 'pass',
-                                   roles=["userAdmin", "readAnyDatabase"])
-        else:
-            admin_db_auth.add_user('ro-admin', 'pass', read_only=True)
+        admin_db_auth.add_user('ro-admin', 'pass',
+                               roles=["userAdmin", "readAnyDatabase"])
 
         self.addCleanup(admin_db_auth.remove_user, 'ro-admin')
         users_db_auth.add_user('user', 'pass',
@@ -769,11 +838,6 @@ class TestDatabase(IntegrationTest):
 
         self.assertRaises(OperationFailure, db.system_js.non_existant)
 
-        # XXX: Broken in V8, works in SpiderMonkey
-        if not client_context.version.at_least(2, 3, 0):
-            db.system_js.no_param = Code("return 5;")
-            self.assertEqual(5, db.system_js.no_param())
-
     def test_system_js_list(self):
         db = self.client.pymongo_test
         db.system.js.delete_many({})
@@ -837,7 +901,6 @@ class TestDatabase(IntegrationTest):
 
         self.assertEqual('outer', str(context.exception))
 
-    @client_context.require_version_min(2, 6, 0)
     @client_context.require_test_commands
     @client_context.require_no_mongos
     def test_command_max_time_ms(self):

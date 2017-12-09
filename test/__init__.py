@@ -1,4 +1,4 @@
-# Copyright 2010-2015 MongoDB, Inc.
+# Copyright 2010-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 import os
 import socket
 import sys
+import time
 import warnings
 
 try:
@@ -88,14 +89,19 @@ def is_server_resolvable():
 
 
 def _connect(host, port, **kwargs):
-    try:
-        client = pymongo.MongoClient(
-            host, port, serverSelectionTimeoutMS=100, **kwargs)
-        client.admin.command('ismaster')  # Can we connect?
-        # If connected, then return client with default timeout
-        return pymongo.MongoClient(host, port, **kwargs)
-    except pymongo.errors.ConnectionFailure:
-        return None
+    client = pymongo.MongoClient(host, port, **kwargs)
+    start = time.time()
+    # Jython takes a long time to connect.
+    if sys.platform.startswith('java'):
+        time_limit = 10
+    else:
+        time_limit = .5
+    while not client.nodes:
+        time.sleep(0.05)
+        if time.time() - start > time_limit:
+            return None
+
+    return client
 
 
 class client_knobs(object):
@@ -147,11 +153,7 @@ class client_knobs(object):
 
 
 def _all_users(db):
-    if Version.from_client(db.client).at_least(2, 5, 3, -1):
-        return set(u['user']
-                   for u in db.command('usersInfo').get('users', []))
-    else:
-        return set(u['user'] for u in db.system.users.find())
+    return set(u['user'] for u in db.command('usersInfo').get('users', []))
 
 
 class ClientContext(object):
@@ -190,32 +192,6 @@ class ClientContext(object):
 
         if self.client:
             self.connected = True
-            ismaster = self.client.admin.command('ismaster')
-            self.sessions_enabled = 'logicalSessionTimeoutMinutes' in ismaster
-
-            if 'setName' in ismaster:
-                self.replica_set_name = ismaster['setName']
-                self.is_rs = True
-                # It doesn't matter which member we use as the seed here.
-                self.client = pymongo.MongoClient(
-                    host,
-                    port,
-                    replicaSet=self.replica_set_name,
-                    **self.ssl_client_options)
-                # Get the authoritative ismaster result from the primary.
-                self.ismaster = self.client.admin.command('ismaster')
-                nodes = [partition_node(node.lower())
-                         for node in self.ismaster.get('hosts', [])]
-                nodes.extend([partition_node(node.lower())
-                              for node in self.ismaster.get('passives', [])])
-                nodes.extend([partition_node(node.lower())
-                              for node in self.ismaster.get('arbiters', [])])
-                self.nodes = set(nodes)
-            else:
-                self.ismaster = ismaster
-                self.nodes = set([(host, port)])
-            self.w = len(self.ismaster.get("hosts", [])) or 1
-            self.version = Version.from_client(self.client)
 
             try:
                 self.cmd_line = self.client.admin.command('getCmdLineOpts')
@@ -232,10 +208,7 @@ class ClientContext(object):
             if self.auth_enabled:
                 # See if db_user already exists.
                 if not self._check_user_provided():
-                    roles = {}
-                    if self.version.at_least(2, 5, 3, -1):
-                        roles = {'roles': ['root']}
-                    self.client.admin.add_user(db_user, db_pwd, **roles)
+                    self.client.admin.add_user(db_user, db_pwd, roles=['root'])
 
                 self.client = _connect(host,
                                        port,
@@ -246,6 +219,43 @@ class ClientContext(object):
 
                 # May not have this if OperationFailure was raised earlier.
                 self.cmd_line = self.client.admin.command('getCmdLineOpts')
+
+            self.ismaster = ismaster = self.client.admin.command('isMaster')
+            self.sessions_enabled = 'logicalSessionTimeoutMinutes' in ismaster
+
+            if 'setName' in ismaster:
+                self.replica_set_name = ismaster['setName']
+                self.is_rs = True
+                if self.auth_enabled:
+                    # It doesn't matter which member we use as the seed here.
+                    self.client = pymongo.MongoClient(
+                        host,
+                        port,
+                        username=db_user,
+                        password=db_pwd,
+                        replicaSet=self.replica_set_name,
+                        **self.ssl_client_options)
+                else:
+                    self.client = pymongo.MongoClient(
+                        host,
+                        port,
+                        replicaSet=self.replica_set_name,
+                        **self.ssl_client_options)
+
+                # Get the authoritative ismaster result from the primary.
+                self.ismaster = self.client.admin.command('ismaster')
+                nodes = [partition_node(node.lower())
+                         for node in self.ismaster.get('hosts', [])]
+                nodes.extend([partition_node(node.lower())
+                              for node in self.ismaster.get('passives', [])])
+                nodes.extend([partition_node(node.lower())
+                              for node in self.ismaster.get('arbiters', [])])
+                self.nodes = set(nodes)
+            else:
+                self.ismaster = ismaster
+                self.nodes = set([(host, port)])
+            self.w = len(self.ismaster.get("hosts", [])) or 1
+            self.version = Version.from_client(self.client)
 
             if 'enableTestCommands=1' in self.cmd_line['argv']:
                 self.test_commands_enabled = True
@@ -436,6 +446,18 @@ class ClientContext(object):
                              "Must be connected to a mongos",
                              func=func)
 
+    def require_standalone(self, func):
+        """Run a test only if the client is connected to a standalone."""
+        return self._require(not (self.is_mongos or self.is_rs),
+                             "Must be connected to a standalone",
+                             func=func)
+
+    def require_no_standalone(self, func):
+        """Run a test only if the client is not connected to a standalone."""
+        return self._require(self.is_mongos or self.is_rs,
+                             "Must be connected to a replica set or mongos",
+                             func=func)
+
     def check_auth_with_sharding(self, func):
         """Skip a test when connected to mongos < 2.0 and running with auth."""
         condition = not (self.auth_enabled and
@@ -487,11 +509,34 @@ class ClientContext(object):
                              "Sessions not supported",
                              func=func)
 
+
 # Reusable client context
 client_context = ClientContext()
 
 
-class IntegrationTest(unittest.TestCase):
+def sanitize_cmd(cmd):
+    cp = cmd.copy()
+    cp.pop('$clusterTime', None)
+    cp.pop('lsid', None)
+    return cp
+
+
+def sanitize_reply(reply):
+    cp = reply.copy()
+    cp.pop('$clusterTime', None)
+    cp.pop('operationTime', None)
+    return cp
+
+
+class PyMongoTestCase(unittest.TestCase):
+    def assertEqualCommand(self, expected, actual, msg=None):
+        self.assertEqual(expected, sanitize_cmd(actual), msg)
+
+    def assertEqualReply(self, expected, actual, msg=None):
+        self.assertEqual(expected, sanitize_reply(actual), msg)
+
+
+class IntegrationTest(PyMongoTestCase):
     """Base class for TestCases that need a connection to MongoDB to pass."""
 
     @classmethod
@@ -499,6 +544,10 @@ class IntegrationTest(unittest.TestCase):
     def setUpClass(cls):
         cls.client = client_context.client
         cls.db = cls.client.pymongo_test
+        if client_context.auth_enabled:
+            cls.credentials = {'username': db_user, 'password': db_pwd}
+        else:
+            cls.credentials = {}
 
 
 # Use assertRaisesRegex if available, otherwise use Python 2.7's

@@ -1,4 +1,4 @@
-# Copyright 2015 MongoDB, Inc.
+# Copyright 2015-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -41,6 +41,7 @@ from pymongo.errors import (BulkWriteError,
                             InvalidDocument,
                             InvalidOperation,
                             OperationFailure,
+                            WriteConcernError,
                             WTimeoutError)
 from pymongo.message import _CursorAddress
 from pymongo.son_manipulator import (AutoReference,
@@ -51,27 +52,14 @@ from pymongo.write_concern import WriteConcern
 from test import client_context, qcheck, unittest, SkipTest
 from test.test_client import IntegrationTest
 from test.test_bulk import BulkTestBase, BulkAuthorizationTestBase
-from test.utils import (joinall,
+from test.utils import (DeprecationFilter,
+                        joinall,
                         oid_generated_on_client,
                         remove_all_users,
                         rs_or_single_client,
                         rs_or_single_client_noauth,
                         single_client,
                         wait_until)
-
-
-class DeprecationFilter(object):
-
-    def __init__(self, action="ignore"):
-        """Start filtering deprecations."""
-        self.warn_context = warnings.catch_warnings()
-        self.warn_context.__enter__()
-        warnings.simplefilter(action, DeprecationWarning)
-
-    def stop(self):
-        """Stop filtering deprecations."""
-        self.warn_context.__exit__()
-        self.warn_context = None
 
 
 class TestDeprecations(IntegrationTest):
@@ -247,6 +235,42 @@ class TestLegacy(IntegrationTest):
 
         db.drop_collection("test_insert_multiple_with_duplicate")
 
+    @client_context.require_replica_set
+    def test_insert_prefers_write_errors(self):
+        # Tests legacy insert.
+        collection = self.db.test_insert_prefers_write_errors
+        self.db.drop_collection(collection.name)
+        collection.insert_one({'_id': 1})
+        large = 's' * 1024 * 1024 * 15
+        with self.assertRaises(DuplicateKeyError):
+            collection.insert(
+                [{'_id': 1, 's': large}, {'_id': 2, 's': large}])
+        self.assertEqual(1, collection.count())
+
+        with self.assertRaises(DuplicateKeyError):
+            collection.insert(
+                [{'_id': 1, 's': large}, {'_id': 2, 's': large}],
+                continue_on_error=True)
+        self.assertEqual(2, collection.count())
+        collection.delete_one({'_id': 2})
+
+        # A writeError followed by a writeConcernError should prefer to raise
+        # the writeError.
+        with self.assertRaises(DuplicateKeyError):
+            collection.insert(
+                [{'_id': 1, 's': large}, {'_id': 2, 's': large}],
+                continue_on_error=True,
+                w=len(client_context.nodes) + 10, wtimeout=1)
+        self.assertEqual(2, collection.count())
+        collection.delete_many({})
+
+        with self.assertRaises(WriteConcernError):
+            collection.insert(
+                [{'_id': 1, 's': large}, {'_id': 2, 's': large}],
+                continue_on_error=True,
+                w=len(client_context.nodes) + 10, wtimeout=1)
+        self.assertEqual(2, collection.count())
+
     def test_insert_iterables(self):
         # Tests legacy insert.
         db = self.db
@@ -358,11 +382,8 @@ class TestLegacy(IntegrationTest):
         db = self.client.test_insert_large_batch
         self.addCleanup(self.client.drop_database, 'test_insert_large_batch')
         max_bson_size = self.client.max_bson_size
-        if client_context.version.at_least(2, 5, 4, -1):
-            # Write commands are limited to 16MB + 16k per batch
-            big_string = 'x' * int(max_bson_size / 2)
-        else:
-            big_string = 'x' * (max_bson_size - 100)
+        # Write commands are limited to 16MB + 16k per batch
+        big_string = 'x' * int(max_bson_size / 2)
 
         # Batch insert that requires 2 batches.
         successful_insert = [{'x': big_string}, {'x': big_string},
@@ -436,19 +457,6 @@ class TestLegacy(IntegrationTest):
         ref_only = {'ref': {'$ref': 'collection'}}
         id_only = {'ref': {'$id': ObjectId()}}
 
-        # Starting with MongoDB 2.5.2 this is no longer possible
-        # from insert, update, or findAndModify.
-        if not client_context.version.at_least(2, 5, 2):
-            # Force insert of ref without $id.
-            c.insert(ref_only, check_keys=False)
-            self.assertEqual(DBRef('collection', id=None),
-                             c.find_one()['ref'])
-
-            c.drop()
-
-            # DBRef without $ref is decoded as normal subdocument.
-            c.insert(id_only, check_keys=False)
-            self.assertEqual(id_only, c.find_one())
 
     def test_update(self):
         # Tests legacy update.
@@ -624,10 +632,7 @@ class TestLegacy(IntegrationTest):
         self.assertTrue(self.db.test.insert({"hello": "world"}))
         doc = self.db.test.find_one()
         doc['a.b'] = 'c'
-        expected = InvalidDocument
-        if client_context.version.at_least(2, 5, 4, -1):
-            expected = OperationFailure
-        self.assertRaises(expected, self.db.test.save, doc)
+        self.assertRaises(OperationFailure, self.db.test.save, doc)
 
     def test_acknowledged_save(self):
         # Tests legacy save.
@@ -702,15 +707,11 @@ class TestLegacy(IntegrationTest):
         half_size = int(max_size / 2)
         self.assertEqual(max_size, 16777216)
 
-        expected = DocumentTooLarge
-        if client_context.version.at_least(2, 5, 4, -1):
-            # Document too large handled by the server
-            expected = OperationFailure
-        self.assertRaises(expected, self.db.test.insert,
+        self.assertRaises(OperationFailure, self.db.test.insert,
                           {"foo": "x" * max_size})
-        self.assertRaises(expected, self.db.test.save,
+        self.assertRaises(OperationFailure, self.db.test.save,
                           {"foo": "x" * max_size})
-        self.assertRaises(expected, self.db.test.insert,
+        self.assertRaises(OperationFailure, self.db.test.insert,
                           [{"x": 1}, {"foo": "x" * max_size}])
         self.db.test.insert([{"foo": "x" * half_size},
                              {"foo": "x" * half_size}])
@@ -765,14 +766,11 @@ class TestLegacy(IntegrationTest):
         c.insert({'_id': 1, 'i': 1})
 
         # Test that we raise DuplicateKeyError when appropriate.
-        # MongoDB doesn't have a code field for DuplicateKeyError
-        # from commands before 2.2.
-        if client_context.version.at_least(2, 2):
-            c.ensure_index('i', unique=True)
-            self.assertRaises(DuplicateKeyError,
-                              c.find_and_modify, query={'i': 1, 'j': 1},
-                              update={'$set': {'k': 1}}, upsert=True)
-            c.drop_indexes()
+        c.ensure_index('i', unique=True)
+        self.assertRaises(DuplicateKeyError,
+                          c.find_and_modify, query={'i': 1, 'j': 1},
+                          update={'$set': {'k': 1}}, upsert=True)
+        c.drop_indexes()
 
         # Test correct findAndModify
         self.assertEqual({'_id': 1, 'i': 1},
@@ -788,15 +786,9 @@ class TestLegacy(IntegrationTest):
 
         self.assertEqual(None,
                          c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}}))
-        # The return value changed in 2.1.2. See SERVER-6226.
-        if client_context.version.at_least(2, 1, 2):
-            self.assertEqual(None, c.find_and_modify({'_id': 1},
-                                                     {'$inc': {'i': 1}},
-                                                     upsert=True))
-        else:
-            self.assertEqual({}, c.find_and_modify({'_id': 1},
-                                                   {'$inc': {'i': 1}},
-                                                   upsert=True))
+        self.assertEqual(None, c.find_and_modify({'_id': 1},
+                                                 {'$inc': {'i': 1}},
+                                                 upsert=True))
         self.assertEqual({'_id': 1, 'i': 2},
                          c.find_and_modify({'_id': 1}, {'$inc': {'i': 1}},
                                            upsert=True, new=True))
@@ -1147,10 +1139,9 @@ class TestLegacy(IntegrationTest):
         self.assertTrue(isinstance(out, Thing))
         self.assertEqual('value', out.value)
 
-        if client_context.version.at_least(2, 6):
-            out = next(db.test.aggregate([], cursor={}))
-            self.assertTrue(isinstance(out, Thing))
-            self.assertEqual('value', out.value)
+        out = next(db.test.aggregate([], cursor={}))
+        self.assertTrue(isinstance(out, Thing))
+        self.assertEqual('value', out.value)
 
     def test_son_manipulator_inheritance(self):
         # Tests legacy API elements.
@@ -1355,12 +1346,6 @@ class TestLegacy(IntegrationTest):
         coll.drop()
 
     def test_kill_cursors_with_cursoraddress(self):
-        if (client_context.is_mongos
-                and not client_context.version.at_least(2, 4, 7)):
-            # Old mongos sends incorrectly formatted error response when
-            # cursor isn't found, see SERVER-9738.
-            raise SkipTest("Can't test kill_cursors against old mongos")
-
         coll = self.client.pymongo_test.test
         coll.drop()
 
@@ -1386,12 +1371,6 @@ class TestLegacy(IntegrationTest):
         wait_until(raises_cursor_not_found, 'close cursor')
 
     def test_kill_cursors_with_tuple(self):
-        if (client_context.is_mongos
-                and not client_context.version.at_least(2, 4, 7)):
-            # Old mongos sends incorrectly formatted error response when
-            # cursor isn't found, see SERVER-9738.
-            raise SkipTest("Can't test kill_cursors against old mongos")
-
         coll = self.client.pymongo_test.test
         coll.drop()
 
@@ -1867,8 +1846,6 @@ class TestLegacyBulk(BulkTestBase):
             'upserted': [{'index': 0, '_id': '...'}]
         }
 
-        # Note, in MongoDB 2.4 the server won't return the
-        # "upserted" field unless _id is an ObjectId
         bulk.find({}).upsert().replace_one({'foo': 'bar'})
         result = bulk.execute()
         self.assertEqualResponse(expected, result)
@@ -1928,12 +1905,8 @@ class TestLegacyBulk(BulkTestBase):
         batch = self.coll.initialize_ordered_bulk_op()
         batch.find({'_id': 0}).upsert().update_one({'$set': {'a': 0}})
         batch.find({'a': 1}).upsert().replace_one({'_id': 1})
-        if not client_context.version.at_least(2, 6, 0):
-            # This case is only possible in MongoDB versions before 2.6.
-            batch.find({'_id': 3}).upsert().replace_one({'_id': 2})
-        else:
-            # This is just here to make the counts right in all cases.
-            batch.find({'_id': 2}).upsert().replace_one({'_id': 2})
+        # This is just here to make the counts right in all cases.
+        batch.find({'_id': 2}).upsert().replace_one({'_id': 2})
         result = batch.execute()
         self.assertEqualResponse(
             {'nMatched': 0,

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright 2009-2014 MongoDB, Inc.
+# Copyright 2009-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -787,6 +787,17 @@ class TestBSON(unittest.TestCase):
 
     def test_regex_hash(self):
         self.assertRaises(TypeError, hash, Regex('hello'))
+
+    def test_regex_comparison(self):
+        re1 = Regex('a')
+        re2 = Regex('b')
+        self.assertNotEqual(re1, re2)
+        re1 = Regex('a', re.I)
+        re2 = Regex('a', re.M)
+        self.assertNotEqual(re1, re2)
+        re1 = Regex('a', re.I)
+        re2 = Regex('a', re.I)
+        self.assertEqual(re1, re2)
 
     def test_exception_wrapping(self):
         # No matter what exception is raised while trying to decode BSON,

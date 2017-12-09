@@ -1,4 +1,4 @@
-# Copyright 2009-2015 MongoDB, Inc.
+# Copyright 2009-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ import itertools
 import random
 import re
 import sys
+import time
+import threading
 
 sys.path[0:0] = [""]
 
@@ -27,7 +29,6 @@ from bson.code import Code
 from bson.py3compat import PY3
 from bson.son import SON
 from pymongo import (monitoring,
-                     MongoClient,
                      ASCENDING,
                      DESCENDING,
                      ALL,
@@ -52,12 +53,7 @@ if PY3:
     long = int
 
 
-class TestCursorNoConnect(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        cls.db = MongoClient(connect=False).test
-
+class TestCursor(IntegrationTest):
     def test_deepcopy_cursor_littered_with_regexes(self):
         cursor = self.db.test.find({
             "x": re.compile("^hmmm.*"),
@@ -134,9 +130,6 @@ class TestCursorNoConnect(unittest.TestCase):
         cursor.remove_option(128)
         self.assertEqual(0, cursor._Cursor__query_flags)
 
-
-class TestCursor(IntegrationTest):
-
     def test_add_remove_option_exhaust(self):
         # Exhaust - which mongos doesn't support
         if client_context.is_mongos:
@@ -153,7 +146,6 @@ class TestCursor(IntegrationTest):
             self.assertEqual(0, cursor._Cursor__query_flags)
             self.assertFalse(cursor._Cursor__exhaust)
 
-    @client_context.require_version_min(2, 5, 3, -1)
     def test_max_time_ms(self):
         db = self.db
         db.pymongo_test.drop()
@@ -179,7 +171,8 @@ class TestCursor(IntegrationTest):
         self.assertTrue(coll.find_one(max_time_ms=1000))
 
         client = self.client
-        if "enableTestCommands=1" in client_context.cmd_line['argv']:
+        if (not client_context.is_mongos
+                and client_context.test_commands_enabled):
             # Cursor parses server timeout error in response to initial query.
             client.admin.command("configureFailPoint",
                                  "maxTimeAlwaysTimeOut",
@@ -319,7 +312,6 @@ class TestCursor(IntegrationTest):
         finally:
             monitoring._LISTENERS = saved_listeners
 
-    @client_context.require_version_min(2, 5, 3, -1)
     @client_context.require_test_commands
     @client_context.require_no_mongos
     def test_max_time_ms_getmore(self):
@@ -354,6 +346,18 @@ class TestCursor(IntegrationTest):
         b = a.explain()
         # "cursor" pre MongoDB 2.7.6, "executionStats" post
         self.assertTrue("cursor" in b or "executionStats" in b)
+
+    def test_explain_with_read_concern(self):
+        # Do not add readConcern level to explain.
+        listener = WhiteListEventListener("explain")
+        client = rs_or_single_client(event_listeners=[listener])
+        self.addCleanup(client.close)
+        coll = client.pymongo_test.test.with_options(
+            read_concern=ReadConcern(level="local"))
+        self.assertTrue(coll.find().explain())
+        started = listener.results['started']
+        self.assertEqual(len(started), 1)
+        self.assertNotIn("readConern", started[0].command)
 
     def test_hint(self):
         db = self.db
@@ -764,28 +768,15 @@ class TestCursor(IntegrationTest):
         self.assertEqual(1, collection.find({'i': 1}).hint("_id_").count())
         self.assertEqual(2, collection.find().hint("_id_").count())
 
-        if client_context.version.at_least(2, 6, 0):
-            # Count supports hint
-            self.assertRaises(OperationFailure,
-                              collection.find({'i': 1}).hint("BAD HINT").count)
-        else:
-            # Hint is ignored
-            self.assertEqual(
-                1, collection.find({'i': 1}).hint("BAD HINT").count())
+        self.assertRaises(OperationFailure,
+                          collection.find({'i': 1}).hint("BAD HINT").count)
 
         # Create a sparse index which should have no entries.
         collection.create_index([('x', 1)], sparse=True)
 
-        if client_context.version.at_least(2, 6, 0):
-            # Count supports hint
-            self.assertEqual(0, collection.find({'i': 1}).hint("x_1").count())
-            self.assertEqual(
-                0, collection.find({'i': 1}).hint([("x", 1)]).count())
-        else:
-            # Hint is ignored
-            self.assertEqual(1, collection.find({'i': 1}).hint("x_1").count())
-            self.assertEqual(
-                1, collection.find({'i': 1}).hint([("x", 1)]).count())
+        self.assertEqual(0, collection.find({'i': 1}).hint("x_1").count())
+        self.assertEqual(
+            0, collection.find({'i': 1}).hint([("x", 1)]).count())
 
         if client_context.version.at_least(3, 3, 2):
             self.assertEqual(0, collection.find().hint("x_1").count())
@@ -1153,6 +1144,27 @@ class TestCursor(IntegrationTest):
             cursor.rewind()
             self.assertEqual([4, 5, 6], [doc["x"] for doc in cursor[0:3]])
 
+    def test_concurrent_close(self):
+        """Ensure a tailable can be closed from another thread."""
+        db = self.db
+        db.drop_collection("test")
+        db.create_collection("test", capped=True, size=1000, max=3)
+        self.addCleanup(db.drop_collection, "test")
+        cursor = db.test.find(cursor_type=CursorType.TAILABLE)
+
+        def iterate_cursor():
+            while cursor.alive:
+                for doc in cursor:
+                    pass
+        t = threading.Thread(target=iterate_cursor)
+        t.start()
+        time.sleep(1)
+        cursor.close()
+        self.assertFalse(cursor.alive)
+        t.join(3)
+        self.assertFalse(t.is_alive())
+
+
     def test_distinct(self):
         self.db.drop_collection("test")
 
@@ -1349,8 +1361,7 @@ class TestCursor(IntegrationTest):
         self.assertTrue(bool(next(cursor)))
         cursor.close()
 
-        # The cursor should be killed if it had a non-zero id (MongoDB 2.4
-        # does not return a cursor for the aggregate command).
+        # The cursor should be killed if it had a non-zero id.
         if cursor.cursor_id:
             assertCursorKilled()
         else:
@@ -1476,8 +1487,6 @@ class TestRawBatchCommandCursor(IntegrationTest):
     @classmethod
     def setUpClass(cls):
         super(TestRawBatchCommandCursor, cls).setUpClass()
-        if not client_context.version >= Version(2, 6):
-            raise SkipTest("Requires MongoDB 2.6 aggregation cursors")
 
     def test_aggregate_raw(self):
         c = self.db.test

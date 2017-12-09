@@ -1,4 +1,4 @@
-# Copyright 2016 MongoDB, Inc.
+# Copyright 2016-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -75,7 +75,7 @@ class TestHeartbeatMonitoring(unittest.TestCase):
                           min_heartbeat_interval=0.1,
                           events_queue_frequency=0.1):
             class MockMonitor(Monitor):
-                def _check_with_socket(self, sock_info, metadata=None):
+                def _check_with_socket(self, *args, **kwargs):
                     if isinstance(responses[1], Exception):
                         raise responses[1]
                     return IsMaster(responses[1]), 99

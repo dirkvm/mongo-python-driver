@@ -1,4 +1,4 @@
-# Copyright 2009-2015 MongoDB, Inc.
+# Copyright 2009-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ SLOW_ONLY = 1
 ALL = 2
 """Profile all operations."""
 
-version_tuple = (3, 6, 0, '.dev0')
+version_tuple = (3, 6, 0)
 
 def get_version_string():
     if isinstance(version_tuple[-1], str):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright 2009-2015 MongoDB, Inc.
+# Copyright 2009-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -232,7 +232,12 @@ class TestGridFile(IntegrationTest):
 
         cursor = GridOutCursor(self.db.fs, {})
         cursor_clone = cursor.clone()
-        self.assertEqual(cursor_clone.__dict__, cursor.__dict__)
+        
+        cursor_dict = cursor.__dict__.copy()
+        cursor_dict.pop('_Cursor__session')
+        cursor_clone_dict = cursor_clone.__dict__.copy()
+        cursor_clone_dict.pop('_Cursor__session')
+        self.assertEqual(cursor_dict, cursor_clone_dict)
 
         self.assertRaises(NotImplementedError, cursor.add_option, 0)
         self.assertRaises(NotImplementedError, cursor.remove_option, 0)

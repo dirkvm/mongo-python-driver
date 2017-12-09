@@ -7,42 +7,105 @@
     {
       "_id": 2,
       "x": 22
-    },
-    {
-      "_id": 3,
-      "x": 33
     }
   ],
-  "maxServerVersion": "2.4.99",
+  "minServerVersion": "3.6",
   "tests": [
     {
-      "description": "UpdateOne when many documents match",
+      "description": "FindOneAndUpdate is committed on first attempt",
+      "failPoint": {
+        "mode": {
+          "times": 1
+        }
+      },
       "operation": {
-        "name": "updateOne",
+        "name": "findOneAndUpdate",
         "arguments": {
           "filter": {
-            "_id": {
-              "$gt": 1
-            }
+            "_id": 1
           },
           "update": {
             "$inc": {
               "x": 1
             }
-          }
+          },
+          "returnDocument": "Before"
         }
       },
       "outcome": {
         "result": {
-          "matchedCount": 1,
-          "upsertedCount": 0
+          "_id": 1,
+          "x": 11
+        },
+        "collection": {
+          "data": [
+            {
+              "_id": 1,
+              "x": 12
+            },
+            {
+              "_id": 2,
+              "x": 22
+            }
+          ]
         }
       }
     },
     {
-      "description": "UpdateOne when one document matches",
+      "description": "FindOneAndUpdate is not committed on first attempt",
+      "failPoint": {
+        "mode": {
+          "times": 1
+        },
+        "data": {
+          "failBeforeCommitExceptionCode": 1
+        }
+      },
       "operation": {
-        "name": "updateOne",
+        "name": "findOneAndUpdate",
+        "arguments": {
+          "filter": {
+            "_id": 1
+          },
+          "update": {
+            "$inc": {
+              "x": 1
+            }
+          },
+          "returnDocument": "Before"
+        }
+      },
+      "outcome": {
+        "result": {
+          "_id": 1,
+          "x": 11
+        },
+        "collection": {
+          "data": [
+            {
+              "_id": 1,
+              "x": 12
+            },
+            {
+              "_id": 2,
+              "x": 22
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "FindOneAndUpdate is never committed",
+      "failPoint": {
+        "mode": {
+          "times": 2
+        },
+        "data": {
+          "failBeforeCommitExceptionCode": 1
+        }
+      },
+      "operation": {
+        "name": "findOneAndUpdate",
         "arguments": {
           "filter": {
             "_id": 1
@@ -55,48 +118,7 @@
         }
       },
       "outcome": {
-        "result": {
-          "matchedCount": 1,
-          "upsertedCount": 0
-        },
-        "collection": {
-          "data": [
-            {
-              "_id": 1,
-              "x": 12
-            },
-            {
-              "_id": 2,
-              "x": 22
-            },
-            {
-              "_id": 3,
-              "x": 33
-            }
-          ]
-        }
-      }
-    },
-    {
-      "description": "UpdateOne when no documents match",
-      "operation": {
-        "name": "updateOne",
-        "arguments": {
-          "filter": {
-            "_id": 4
-          },
-          "update": {
-            "$inc": {
-              "x": 1
-            }
-          }
-        }
-      },
-      "outcome": {
-        "result": {
-          "matchedCount": 0,
-          "upsertedCount": 0
-        },
+        "error": true,
         "collection": {
           "data": [
             {
@@ -106,54 +128,6 @@
             {
               "_id": 2,
               "x": 22
-            },
-            {
-              "_id": 3,
-              "x": 33
-            }
-          ]
-        }
-      }
-    },
-    {
-      "description": "UpdateOne with upsert when no documents match",
-      "operation": {
-        "name": "updateOne",
-        "arguments": {
-          "filter": {
-            "_id": 4
-          },
-          "update": {
-            "$inc": {
-              "x": 1
-            }
-          },
-          "upsert": true
-        }
-      },
-      "outcome": {
-        "result": {
-          "matchedCount": 0,
-          "upsertedCount": 1,
-          "upsertedId": 4
-        },
-        "collection": {
-          "data": [
-            {
-              "_id": 1,
-              "x": 11
-            },
-            {
-              "_id": 2,
-              "x": 22
-            },
-            {
-              "_id": 3,
-              "x": 33
-            },
-            {
-              "_id": 4,
-              "x": 1
             }
           ]
         }

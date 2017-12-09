@@ -1,4 +1,4 @@
-# Copyright 2009-2015 MongoDB, Inc.
+# Copyright 2009-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -124,9 +124,19 @@ class Cursor(object):
 
         .. mongodoc:: cursors
         """
+        # Initialize all attributes used in __del__ before possibly raising
+        # an error to avoid attribute errors during garbage collection.
         self.__id = None
         self.__exhaust = False
         self.__exhaust_mgr = None
+        self.__killed = False
+
+        if session:
+            self.__session = session
+            self.__explicit_session = True
+        else:
+            self.__session = None
+            self.__explicit_session = False
 
         spec = filter
         if spec is None:
@@ -177,7 +187,6 @@ class Cursor(object):
         self.__return_key = return_key
         self.__show_record_id = show_record_id
         self.__snapshot = snapshot
-        self.__session = session
         self.__set_hint(hint)
 
         # Exhaust cursor support
@@ -200,7 +209,6 @@ class Cursor(object):
         self.__data = deque()
         self.__address = None
         self.__retrieved = 0
-        self.__killed = False
 
         self.__codec_options = collection.codec_options
         self.__read_preference = collection.read_preference
@@ -262,7 +270,10 @@ class Cursor(object):
     def _clone(self, deepcopy=True, base=None):
         """Internal clone helper."""
         if not base:
-            base = self._clone_base()
+            if self.__explicit_session:
+                base = self._clone_base(self.__session)
+            else:
+                base = self._clone_base(None)
 
         values_to_clone = ("spec", "projection", "skip", "limit",
                            "max_time_ms", "max_await_time_ms", "comment",
@@ -274,18 +285,19 @@ class Cursor(object):
         if deepcopy:
             data = self._deepcopy(data)
         base.__dict__.update(data)
-        base.__session = self.session
         return base
 
-    def _clone_base(self):
+    def _clone_base(self, session):
         """Creates an empty Cursor object for information to be copied into.
         """
-        return self.__class__(self.__collection)
+        return self.__class__(self.__collection, session=session)
 
     def __die(self, synchronous=False):
         """Closes this cursor.
         """
-        if self.__id and not self.__killed:
+        already_killed = self.__killed
+        self.__killed = True
+        if self.__id and not already_killed:
             if self.__exhaust and self.__exhaust_mgr:
                 # If this is an exhaust cursor and we haven't completely
                 # exhausted the result set we *must* close the socket
@@ -303,7 +315,9 @@ class Cursor(object):
                         self.__id, address)
         if self.__exhaust and self.__exhaust_mgr:
             self.__exhaust_mgr.close()
-        self.__killed = True
+        if self.__session and not self.__explicit_session:
+            self.__session._end_session(lock=synchronous)
+            self.__session = None
 
     def close(self):
         """Explicitly close / kill this cursor.
@@ -893,6 +907,9 @@ class Cursor(object):
         listeners = client._event_listeners
         publish = listeners.enabled_for_commands
         from_command = False
+        start = datetime.datetime.now()
+
+        def duration(): return datetime.datetime.now() - start
 
         if operation:
             kwargs = {
@@ -912,8 +929,7 @@ class Cursor(object):
                                                         response.pool)
 
                 cmd_name = operation.name
-                data = response.data
-                cmd_duration = response.duration
+                reply = response.data
                 rqst_id = response.request_id
                 from_command = response.from_command
             except AutoReconnect:
@@ -937,29 +953,25 @@ class Cursor(object):
                     cmd['maxTimeMS'] = self.__max_time_ms
                 listeners.publish_command_start(
                     cmd, self.__collection.database.name, 0, self.__address)
-                start = datetime.datetime.now()
             try:
-                data = self.__exhaust_mgr.sock.receive_message(1, None)
+                reply = self.__exhaust_mgr.sock.receive_message(None)
             except Exception as exc:
                 if publish:
-                    duration = datetime.datetime.now() - start
                     listeners.publish_command_failure(
-                        duration, _convert_exception(exc), cmd_name, rqst_id,
+                        duration(), _convert_exception(exc), cmd_name, rqst_id,
                         self.__address)
                 if isinstance(exc, ConnectionFailure):
                     self.__die()
                 raise
-            if publish:
-                cmd_duration = datetime.datetime.now() - start
 
-        if publish:
-            start = datetime.datetime.now()
         try:
-            doc = self._unpack_response(response=data,
-                                        cursor_id=self.__id,
-                                        codec_options=self.__codec_options)
+            docs = self._unpack_response(response=reply,
+                                         cursor_id=self.__id,
+                                         codec_options=self.__codec_options)
             if from_command:
-                helpers._check_command_response(doc['data'][0])
+                first = docs[0]
+                client._receive_cluster_time(first, self.__session)
+                helpers._check_command_response(first)
         except OperationFailure as exc:
             self.__killed = True
 
@@ -967,9 +979,8 @@ class Cursor(object):
             self.__die()
 
             if publish:
-                duration = (datetime.datetime.now() - start) + cmd_duration
                 listeners.publish_command_failure(
-                    duration, exc.details, cmd_name, rqst_id, self.__address)
+                    duration(), exc.details, cmd_name, rqst_id, self.__address)
 
             # If this is a tailable cursor the error is likely
             # due to capped collection roll over. Setting
@@ -987,40 +998,37 @@ class Cursor(object):
             self.__die()
 
             if publish:
-                duration = (datetime.datetime.now() - start) + cmd_duration
                 listeners.publish_command_failure(
-                    duration, exc.details, cmd_name, rqst_id, self.__address)
+                    duration(), exc.details, cmd_name, rqst_id, self.__address)
 
             client._reset_server_and_request_check(self.__address)
             raise
         except Exception as exc:
             if publish:
-                duration = (datetime.datetime.now() - start) + cmd_duration
                 listeners.publish_command_failure(
-                    duration, _convert_exception(exc), cmd_name, rqst_id,
+                    duration(), _convert_exception(exc), cmd_name, rqst_id,
                     self.__address)
             raise
 
         if publish:
-            duration = (datetime.datetime.now() - start) + cmd_duration
             # Must publish in find / getMore / explain command response format.
             if from_command:
-                res = doc['data'][0]
+                res = docs[0]
             elif cmd_name == "explain":
-                res = doc["data"][0] if doc["number_returned"] else {}
+                res = docs[0] if reply.number_returned else {}
             else:
-                res = {"cursor": {"id": doc["cursor_id"],
+                res = {"cursor": {"id": reply.cursor_id,
                                   "ns": self.__collection.full_name},
                        "ok": 1}
                 if cmd_name == "find":
-                    res["cursor"]["firstBatch"] = doc["data"]
+                    res["cursor"]["firstBatch"] = docs
                 else:
-                    res["cursor"]["nextBatch"] = doc["data"]
+                    res["cursor"]["nextBatch"] = docs
             listeners.publish_command_success(
-                duration, res, cmd_name, rqst_id, self.__address)
+                duration(), res, cmd_name, rqst_id, self.__address)
 
         if from_command and cmd_name != "explain":
-            cursor = doc['data'][0]['cursor']
+            cursor = docs[0]['cursor']
             self.__id = cursor['id']
             if cmd_name == 'find':
                 documents = cursor['firstBatch']
@@ -1029,9 +1037,9 @@ class Cursor(object):
             self.__data = deque(documents)
             self.__retrieved += len(documents)
         else:
-            self.__id = doc["cursor_id"]
-            self.__data = deque(doc["data"])
-            self.__retrieved += doc["number_returned"]
+            self.__id = reply.cursor_id
+            self.__data = deque(docs)
+            self.__retrieved += reply.number_returned
 
         if self.__id == 0:
             self.__killed = True
@@ -1046,7 +1054,7 @@ class Cursor(object):
             self.__exhaust_mgr.close()
 
     def _unpack_response(self, response, cursor_id, codec_options):
-        return helpers._unpack_response(response, cursor_id, codec_options)
+        return response.unpack_response(cursor_id, codec_options)
 
     def _refresh(self):
         """Refreshes the cursor with more data from Mongo.
@@ -1057,6 +1065,9 @@ class Cursor(object):
         """
         if len(self.__data) or self.__killed:
             return len(self.__data)
+
+        if not self.__session:
+            self.__session = self.__collection.database.client._ensure_session()
 
         if self.__id is None:  # Query
             q = self._query_class(self.__query_flags,
@@ -1071,7 +1082,8 @@ class Cursor(object):
                                   self.__batch_size,
                                   self.__read_concern,
                                   self.__collation,
-                                  self.__session)
+                                  self.__session,
+                                  self.__collection.database.client)
             self.__send_message(q)
             if not self.__id:
                 self.__killed = True
@@ -1092,8 +1104,9 @@ class Cursor(object):
                                         limit,
                                         self.__id,
                                         self.__codec_options,
-                                        self.__max_await_time_ms,
-                                        self.__session)
+                                        self.__session,
+                                        self.__collection.database.client,
+                                        self.__max_await_time_ms)
                 self.__send_message(g)
 
         else:  # Cursor id is zero nothing else to return
@@ -1150,7 +1163,8 @@ class Cursor(object):
 
         .. versionadded:: 3.6
         """
-        return self.__session
+        if self.__explicit_session:
+            return self.__session
 
     def __iter__(self):
         return self
@@ -1249,7 +1263,7 @@ class RawBatchCursor(Cursor):
                 "Cannot use RawBatchCursor with manipulate=True")
 
     def _unpack_response(self, response, cursor_id, codec_options):
-        return helpers._raw_response(response, cursor_id)
+        return response.raw_response(cursor_id)
 
     def explain(self):
         """Returns an explain plan record for this cursor.

@@ -1,4 +1,4 @@
-# Copyright 2012-2015 MongoDB, Inc.
+# Copyright 2012-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +35,6 @@ from pymongo.write_concern import WriteConcern
 from test import (client_context,
                   db_user,
                   db_pwd)
-from test.version import Version
 
 
 IMPOSSIBLE_WRITE_CONCERN = WriteConcern(w=1000)
@@ -265,13 +264,8 @@ def drop_collections(db):
 
 
 def remove_all_users(db):
-    if Version.from_client(db.client).at_least(2, 5, 3, -1):
-        db.command("dropAllUsersFromDatabase", 1,
-                   writeConcern={"w": client_context.w})
-    else:
-        db = db.client.get_database(
-            db.name, write_concern=WriteConcern(w=client_context.w))
-        db.system.users.delete_many({})
+    db.command("dropAllUsersFromDatabase", 1,
+               writeConcern={"w": client_context.w})
 
 
 def joinall(threads):
@@ -322,17 +316,6 @@ def is_mongos(client):
     return res.get('msg', '') == 'isdbgrid'
 
 
-def enable_text_search(client):
-    sinfo = client.server_info()
-    if 'versionArray' in sinfo and sinfo['versionArray'][:2] == [2, 4]:
-        client.admin.command(
-            'setParameter', textSearchEnabled=True)
-
-        for host, port in client.secondaries:
-            client = single_client(host, port)
-            client.admin.command('setParameter', textSearchEnabled=True)
-
-
 def assertRaisesExactly(cls, fn, *args, **kwargs):
     """
     Unlike the standard assertRaises, this checks that a function raises a
@@ -367,6 +350,20 @@ def ignore_deprecations(wrapped=None):
 
     else:
         return _ignore_deprecations()
+
+
+class DeprecationFilter(object):
+
+    def __init__(self, action="ignore"):
+        """Start filtering deprecations."""
+        self.warn_context = warnings.catch_warnings()
+        self.warn_context.__enter__()
+        warnings.simplefilter(action, DeprecationWarning)
+
+    def stop(self):
+        """Stop filtering deprecations."""
+        self.warn_context.__exit__()
+        self.warn_context = None
 
 
 def read_from_which_host(

@@ -1,25 +1,61 @@
 Changelog
 =========
 
-Changes in Next Version
------------------------
+Changes in Version 3.6.0
+------------------------
 
-This version drops support for MongoDB versions older than 2.6. If connecting to
-a MongoDB 2.4 server or older, PyMongo now throws a
+Version 3.6 adds support for MongoDB 3.6, drops support for CPython 3.3 (PyPy3
+is still supported), and drops support for MongoDB versions older than 2.6. If
+connecting to a MongoDB 2.4 server or older, PyMongo now throws a
 :exc:`~pymongo.errors.ConfigurationError`.
-
-.. warning:: This version drops support for CPython 3.3 (pypy3 continues to
-  be supported).
 
 Highlights include:
 
+- Support for change streams. See the
+  :meth:`~pymongo.collection.Collection.watch` method for details.
+- Support for array_filters in
+  :meth:`~pymongo.collection.Collection.update_one`,
+  :meth:`~pymongo.collection.Collection.update_many`,
+  :meth:`~pymongo.collection.Collection.find_one_and_update`,
+  :meth:`~pymongo.operations.UpdateOne`, and
+  :meth:`~pymongo.operations.UpdateMany`.
 - New Session API, see :meth:`~pymongo.mongo_client.MongoClient.start_session`.
 - New methods :meth:`~pymongo.collection.Collection.find_raw_batches` and
   :meth:`~pymongo.collection.Collection.aggregate_raw_batches` for use with
   external libraries that can parse raw batches of BSON data.
+- New methods :meth:`~pymongo.mongo_client.MongoClient.list_databases` and
+  :meth:`~pymongo.mongo_client.MongoClient.list_database_names`.
+- New methods :meth:`~pymongo.database.Database.list_collections` and
+  :meth:`~pymongo.database.Database.list_collection_names`.
+- Support for mongodb+srv:// URIs. See
+  :class:`~pymongo.mongo_client.MongoClient` for details.
+- Index management helpers
+  (:meth:`~pymongo.collection.Collection.create_index`,
+  :meth:`~pymongo.collection.Collection.create_indexes`,
+  :meth:`~pymongo.collection.Collection.drop_index`,
+  :meth:`~pymongo.collection.Collection.drop_indexes`,
+  :meth:`~pymongo.collection.Collection.reindex`) now support maxTimeMS.
+- Support for retryable writes and the ``retryWrites`` URI option.  See
+  :class:`~pymongo.mongo_client.MongoClient` for details.
 
-Breaking changes include:
+Deprecations:
 
+- The `useCursor` option for :meth:`~pymongo.collection.Collection.aggregate`
+  is deprecated. The option was only necessary when upgrading from MongoDB
+  2.4 to MongoDB 2.6. MongoDB 2.4 is no longer supported.
+- The :meth:`~pymongo.database.Database.add_user` and
+  :meth:`~pymongo.database.Database.remove_user` methods are deprecated. See
+  the method docstrings for alternatives.
+
+Unavoidable breaking changes:
+
+- Starting in MongoDB 3.6, the deprecated methods
+  :meth:`~pymongo.database.Database.authenticate` and
+  :meth:`~pymongo.database.Database.logout` now invalidate all cursors created
+  prior. Instead of using these methods to change credentials, pass credentials
+  for one user to the :class:`~pymongo.mongo_client.MongoClient` at construction
+  time, and either grant access to several databases to one user account, or use
+  a distinct client object for each user.
 - BSON binary subtype 4 is decoded using RFC-4122 byte order regardless
   of the UUID representation. This is a change in behavior for applications
   that use UUID representation :data:`bson.binary.JAVA_LEGACY` or
@@ -27,6 +63,15 @@ Breaking changes include:
   UUID representations, :data:`bson.binary.PYTHON_LEGACY` (the default) and
   :data:`bson.binary.STANDARD`, and the decoding of BSON binary subtype 3
   are unchanged.
+
+
+Issues Resolved
+...............
+
+See the `PyMongo 3.6 release notes in JIRA`_ for the list of resolved issues
+in this release.
+
+.. _PyMongo 3.6 release notes in JIRA: https://jira.mongodb.org/secure/ReleaseNote.jspa?projectId=10004&version=18043
 
 Changes in Version 3.5.1
 ------------------------

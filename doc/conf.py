@@ -9,8 +9,6 @@ sys.path[0:0] = [os.path.abspath('..')]
 
 import pymongo
 
-import datetime
-
 # -- General configuration -----------------------------------------------------
 
 # Add any Sphinx extension module names here, as strings. They can be extensions
@@ -30,7 +28,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'PyMongo'
-copyright = u'MongoDB, Inc. 2008-{0}. MongoDB, Mongo, and the leaf logo are registered trademarks of MongoDB, Inc'.format(datetime.date.today().year)
+copyright = u'MongoDB, Inc. 2008-present. MongoDB, Mongo, and the leaf logo are registered trademarks of MongoDB, Inc'
 html_show_sphinx = False
 
 # The version info for the project you're documenting, acts as replacement for

@@ -1,4 +1,4 @@
-# Copyright 2014-2015 MongoDB, Inc.
+# Copyright 2014-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -273,8 +273,6 @@ class TestBulk(BulkTestBase):
             'upserted': [{'index': 0, '_id': '...'}]
         }
 
-        # Note, in MongoDB 2.4 the server won't return the
-        # "upserted" field unless _id is an ObjectId
         result = self.coll.bulk_write([ReplaceOne({},
                                                   {'foo': 'bar'},
                                                   upsert=True)])
@@ -337,7 +335,6 @@ class BulkAuthorizationTestBase(BulkTestBase):
 
     @classmethod
     @client_context.require_auth
-    @client_context.require_version_min(2, 5, 3)
     def setUpClass(cls):
         super(BulkAuthorizationTestBase, cls).setUpClass()
 

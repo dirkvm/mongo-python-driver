@@ -1,4 +1,4 @@
-# Copyright 2011-2016 MongoDB, Inc.
+# Copyright 2011-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -444,10 +444,9 @@ class TestCommandAndReadPreference(TestReplicaSetClientBase):
         self._test_coll_helper(True, self.c.pymongo_test.test, 'distinct', 'a')
 
     def test_aggregate(self):
-        if self.client_version.at_least(2, 1, 0):
-            self._test_coll_helper(True, self.c.pymongo_test.test,
-                                   'aggregate',
-                                   [{'$project': {'_id': 1}}])
+        self._test_coll_helper(True, self.c.pymongo_test.test,
+                               'aggregate',
+                               [{'$project': {'_id': 1}}])
 
 
 class TestMovingAverage(unittest.TestCase):

@@ -33,6 +33,7 @@ from bson.raw_bson import DEFAULT_RAW_BSON_OPTIONS, RawBSONDocument
 from pymongo.command_cursor import CommandCursor
 from pymongo.errors import (InvalidOperation, OperationFailure,
                             ServerSelectionTimeoutError)
+from pymongo.message import _CursorAddress
 from pymongo.read_concern import ReadConcern
 
 from test import client_context, unittest, IntegrationTest
@@ -43,13 +44,19 @@ class TestChangeStream(IntegrationTest):
 
     @classmethod
     @client_context.require_version_min(3, 5, 11)
-    @client_context.require_replica_set
+    @client_context.require_no_standalone
     def setUpClass(cls):
         super(TestChangeStream, cls).setUpClass()
-        # $changeStream requires read concern majority.
-        cls.db = cls.client.get_database(
-            cls.db.name, read_concern=ReadConcern('majority'))
         cls.coll = cls.db.change_stream_test
+        # SERVER-31885 On a mongos the database must exist in order to create
+        # a changeStream cursor. However, WiredTiger drops the database when
+        # there are no more collections. Let's prevent that.
+        cls.db.prevent_implicit_database_deletion.insert_one({})
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.db.prevent_implicit_database_deletion.drop()
+        super(TestChangeStream, cls).tearDownClass()
 
     def setUp(self):
         # Use a new collection for each test.
@@ -137,8 +144,8 @@ class TestChangeStream(IntegrationTest):
             t = threading.Thread(
                 target=lambda: changes.append(change_stream.next()))
             t.start()
-            time.sleep(1)
             self.coll.insert_one(inserted_doc)
+            time.sleep(1)
             t.join(3)
             self.assertFalse(t.is_alive())
             self.assertEqual(1, len(changes))
@@ -154,13 +161,28 @@ class TestChangeStream(IntegrationTest):
             t = threading.Thread(
                 target=lambda: changes.append(change_stream.next()))
             t.start()
-            time.sleep(1)
             self.coll.insert_one(inserted_doc)
+            time.sleep(1)
             t.join(3)
             self.assertFalse(t.is_alive())
             self.assertEqual(1, len(changes))
             self.assertEqual(changes[0]['operationType'], 'insert')
             self.assertEqual(changes[0]['fullDocument'], inserted_doc)
+
+    def test_concurrent_close(self):
+        """Ensure a ChangeStream can be closed from another thread."""
+        # Use a short await time to speed up the test.
+        with self.coll.watch(max_await_time_ms=250) as change_stream:
+            def iterate_cursor():
+                for change in change_stream:
+                    pass
+            t = threading.Thread(target=iterate_cursor)
+            t.start()
+            self.coll.insert_one({})
+            time.sleep(1)
+            change_stream.close()
+            t.join(3)
+            self.assertFalse(t.is_alive())
 
     def test_update_resume_token(self):
         """ChangeStream must continuously track the last seen resumeToken."""
@@ -179,6 +201,9 @@ class TestChangeStream(IntegrationTest):
             self.coll.insert_one({})
             with self.assertRaises(InvalidOperation):
                 next(change_stream)
+            # The cursor should now be closed.
+            with self.assertRaises(StopIteration):
+                next(change_stream)
 
     def test_resume_on_error(self):
         """ChangeStream will automatically resume one time on a resumable
@@ -189,7 +214,8 @@ class TestChangeStream(IntegrationTest):
             self.insert_and_check(change_stream, {'_id': 1})
             # Cause a cursor not found error on the next getMore.
             cursor = change_stream._cursor
-            self.client._close_cursor_now(cursor.cursor_id, cursor.address)
+            address = _CursorAddress(cursor.address, self.coll.full_name)
+            self.client._close_cursor_now(cursor.cursor_id, address)
             self.insert_and_check(change_stream, {'_id': 2})
 
     def test_does_not_resume_on_server_error(self):
@@ -235,7 +261,8 @@ class TestChangeStream(IntegrationTest):
             self.insert_and_check(change_stream, {'_id': 1})
             # Cause a cursor not found error on the next getMore.
             cursor = change_stream._cursor
-            self.client._close_cursor_now(cursor.cursor_id, cursor.address)
+            address = _CursorAddress(cursor.address, self.coll.full_name)
+            self.client._close_cursor_now(cursor.cursor_id, address)
             cursor.close = raise_error
             self.insert_and_check(change_stream, {'_id': 2})
 
@@ -340,12 +367,23 @@ class TestChangeStream(IntegrationTest):
                 coll.insert_one(random_doc)
                 resume_token = change_stream.next()['_id']
 
-            # The resume token is always a RawBSONDocument.
-            self.assertIsInstance(resume_token, RawBSONDocument)
+            # The resume token is always a document.
+            self.assertIsInstance(resume_token, document_class)
             # Should not error.
             coll.watch(resume_after=resume_token)
             coll.delete_many({})
 
+    def test_read_concern(self):
+        """Test readConcern is not validated by the driver."""
+        # Read concern 'local' is not allowed for $changeStream.
+        coll = self.coll.with_options(read_concern=ReadConcern('local'))
+        with self.assertRaises(OperationFailure):
+            coll.watch()
+
+        # Does not error.
+        coll = self.coll.with_options(read_concern=ReadConcern('majority'))
+        with coll.watch():
+            pass
 
 if __name__ == '__main__':
     unittest.main()

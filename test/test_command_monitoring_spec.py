@@ -1,4 +1,4 @@
-# Copyright 2015 MongoDB, Inc.
+# Copyright 2015-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -81,9 +81,7 @@ def create_test(scenario_def, test):
         coll.insert_many(scenario_def['data'])
         self.listener.results.clear()
         name = camel_to_snake(test['operation']['name'])
-        # Don't send $readPreference to mongos before 2.4.
-        if (client_context.version.at_least(2, 4, 0)
-                and 'read_preference' in test['operation']):
+        if 'read_preference' in test['operation']:
             mode = read_pref_mode_from_name(
                 test['operation']['read_preference']['mode'])
             coll = coll.with_options(
@@ -225,7 +223,7 @@ def create_tests():
                         new_test = client_context.require_no_mongos(None)(
                             new_test)
 
-                test_name = 'test_%s.%s.%s' % (
+                test_name = 'test_%s_%s_%s' % (
                     dirname,
                     os.path.splitext(filename)[0],
                     str(test['description'].replace(" ", "_")))

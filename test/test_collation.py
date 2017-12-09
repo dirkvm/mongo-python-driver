@@ -1,4 +1,4 @@
-# Copyright 2016 MongoDB, Inc.
+# Copyright 2016-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -114,10 +114,13 @@ class TestCollation(unittest.TestCase):
     def tearDown(self):
         self.listener.results.clear()
 
+    def last_command_started(self):
+        return self.listener.results['started'][-1].command
+
     def assertCollationInLastCommand(self):
         self.assertEqual(
             self.collation.document,
-            self.listener.results['started'][-1].command['collation'])
+            self.last_command_started()['collation'])
 
     @raisesConfigurationErrorForOldMongoDB
     def test_create_collection(self):
@@ -181,6 +184,15 @@ class TestCollation(unittest.TestCase):
         self.listener.results.clear()
         next(self.db.test.find(collation=self.collation))
         self.assertCollationInLastCommand()
+
+    @raisesConfigurationErrorForOldMongoDB
+    def test_explain_command(self):
+        self.listener.results.clear()
+        self.db.test.find(collation=self.collation).explain()
+        # The collation should be part of the explained command.
+        self.assertEqual(
+            self.collation.document,
+            self.last_command_started()['explain']['collation'])
 
     @raisesConfigurationErrorForOldMongoDB
     def test_group(self):
@@ -351,7 +363,7 @@ class TestCollation(unittest.TestCase):
             bulk.execute()
         self.assertIsNone(self.db.test.find_one({'foo': 42}))
 
-    @client_context.require_version_min(3, 3, 11)
+    @raisesConfigurationErrorForOldMongoDB
     def test_indexes_same_keys_different_collations(self):
         self.db.test.drop()
         usa_collation = Collation('en_US')

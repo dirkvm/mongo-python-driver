@@ -1,4 +1,4 @@
-# Copyright 2014-2015 MongoDB, Inc.
+# Copyright 2014-present MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -254,7 +254,7 @@ class TestSingleServerTopology(TopologyTest):
         available = True
 
         class TestMonitor(Monitor):
-            def _check_with_socket(self, sock_info, metadata=None):
+            def _check_with_socket(self, *args, **kwargs):
                 if available:
                     return (IsMaster({'ok': 1, 'maxWireVersion': 6}),
                             round_trip_time)
@@ -567,8 +567,33 @@ class TestMultiServerTopology(TopologyTest):
             t.select_servers(any_server_selector)
         except ConfigurationError as e:
             # Error message should say which server failed and why.
-            self.assertTrue('a:27017' in str(e))
-            self.assertTrue('wire protocol versions 11 through 12' in str(e))
+            self.assertEqual(
+                str(e),
+                "Server at a:27017 requires wire version 11, but this version "
+                "of PyMongo only supports up to %d."
+                % (common.MAX_SUPPORTED_WIRE_VERSION,))
+        else:
+            self.fail('No error with incompatible wire version')
+
+        # Incompatible.
+        got_ismaster(t, address, {
+            'ok': 1,
+            'ismaster': True,
+            'setName': 'rs',
+            'hosts': ['a'],
+            'minWireVersion': 0,
+            'maxWireVersion': 0})
+
+        try:
+            t.select_servers(any_server_selector)
+        except ConfigurationError as e:
+            # Error message should say which server failed and why.
+            self.assertEqual(
+                str(e),
+                "Server at a:27017 reports wire version 0, but this version "
+                "of PyMongo requires at least %d (MongoDB %s)."
+                % (common.MIN_SUPPORTED_WIRE_VERSION,
+                   common.MIN_SUPPORTED_SERVER_VERSION))
         else:
             self.fail('No error with incompatible wire version')
 
@@ -619,6 +644,7 @@ def wait_for_master(topology):
     thread. In applications this is harmless but it would break some tests,
     so we pass server_selection_timeout=0 and poll instead.
     """
+
     def get_master():
         try:
             return topology.select_server(writable_server_selector, 0)
@@ -636,7 +662,7 @@ class TestTopologyErrors(TopologyTest):
         ismaster_count = [0]
 
         class TestMonitor(Monitor):
-            def _check_with_socket(self, sock_info, metadata=None):
+            def _check_with_socket(self, *args, **kwargs):
                 ismaster_count[0] += 1
                 if ismaster_count[0] == 1:
                     return IsMaster({'ok': 1, 'maxWireVersion': 6}), 0
@@ -657,7 +683,7 @@ class TestTopologyErrors(TopologyTest):
         ismaster_count = [0]
 
         class TestMonitor(Monitor):
-            def _check_with_socket(self, sock_info, metadata=None):
+            def _check_with_socket(self, *args, **kwargs):
                 ismaster_count[0] += 1
                 if ismaster_count[0] in (1, 3):
                     return IsMaster({'ok': 1, 'maxWireVersion': 6}), 0
@@ -679,7 +705,7 @@ class TestTopologyErrors(TopologyTest):
         exception = AssertionError('internal error')
 
         class TestMonitor(Monitor):
-            def _check_with_socket(self, sock_info, metadata=None):
+            def _check_with_socket(self, *args, **kwargs):
                 raise exception
 
         t = create_mock_topology(monitor_class=TestMonitor)
